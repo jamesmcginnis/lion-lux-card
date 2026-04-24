@@ -32,6 +32,7 @@ class LionLuxCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._popupOverlay   = null;
     this._sensorPopup    = null;
+    this._graphHours     = 24;
   }
 
   static getConfigElement() {
@@ -740,7 +741,7 @@ class LionLuxCard extends HTMLElement {
     lastRow.appendChild(lastLbl); lastRow.appendChild(lastRight);
     lastRow.addEventListener('click', ev => {
       ev.stopPropagation();
-      this._openHistoryPopup(entityId, name, accent, popupBg, textCol, highCol);
+      this._openGraphPopup(entityId);
     });
     listCard.appendChild(lastRow);
 
@@ -765,100 +766,401 @@ class LionLuxCard extends HTMLElement {
     this._sensorPopup = sensorOverlay;
   }
 
-  // ── History Popup ─────────────────────────────────────────────────────────
+  // ── Graph Popup ───────────────────────────────────────────────────────────
 
-  async _openHistoryPopup(entityId, name, accent, popupBg, textCol, highCol) {
-    const existing = document.getElementById('lion-history-sheet');
+  async _openGraphPopup(entityId) {
+    const existing = document.getElementById('lion-graph-sheet');
     if (existing) existing.remove();
 
-    const sheet = document.createElement('div');
-    sheet.id = 'lion-history-sheet';
-    sheet.style.cssText = `position:fixed;inset:0;z-index:11000;display:flex;align-items:flex-end;justify-content:center;padding:16px;background:rgba(0,0,0,0.5);backdrop-filter:blur(8px);`;
+    const cfg      = this._config;
+    const popupBg  = cfg.popup_bg     || '#1c1c1e';
+    const accent   = cfg.accent_color || '#FFD60A';
+    const textCol  = cfg.text_color   || '#ffffff';
+    const highCol  = cfg.high_color   || '#FF9F0A';
+    const name     = this._name(entityId);
+    const lux      = this._lux(entityId);
+    const isHigh   = this._isHigh(entityId);
+    const unit     = this._unit(entityId);
+    const stateObj = this._hass?.states[entityId];
+    const attrs    = stateObj?.attributes || {};
 
-    const inner = document.createElement('div');
-    inner.style.cssText = `background:${popupBg};border:1px solid rgba(255,255,255,0.13);border-radius:22px;padding:18px;width:100%;max-width:380px;max-height:70vh;overflow-y:auto;font-family:${this._haFont()};color:${textCol};`;
+    this._graphHours = 24;
 
-    const titleRow = document.createElement('div');
-    titleRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;';
-    titleRow.innerHTML = `
-      <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.06em;">24h History</div>
-      <button style="background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:26px;height:26px;cursor:pointer;color:rgba(255,255,255,0.65);font-size:14px;display:flex;align-items:center;justify-content:center;padding:0;font-family:inherit;">✕</button>`;
-    titleRow.querySelector('button').addEventListener('click', () => sheet.remove());
-    inner.appendChild(titleRow);
+    const graphOverlay = document.createElement('div');
+    graphOverlay.id = 'lion-graph-sheet';
+    graphOverlay.style.cssText = `position:fixed;inset:0;z-index:11000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);`;
 
-    const loadingEl = document.createElement('div');
-    loadingEl.style.cssText = 'text-align:center;padding:20px;color:rgba(255,255,255,0.25);font-size:13px;';
-    loadingEl.textContent = 'Loading…';
-    inner.appendChild(loadingEl);
+    const closeGraph = () => {
+      graphOverlay.style.transition = 'opacity 0.15s ease';
+      graphOverlay.style.opacity    = '0';
+      setTimeout(() => { if (graphOverlay.parentNode) graphOverlay.parentNode.removeChild(graphOverlay); }, 150);
+    };
 
-    sheet.appendChild(inner);
-    sheet.addEventListener('click', e => { if (e.target === sheet) sheet.remove(); });
-    document.body.appendChild(sheet);
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes lionGraphUp { from{transform:translateY(20px) scale(0.97);opacity:0} to{transform:none;opacity:1} }
+      .lion-graph-popup { animation: lionGraphUp 0.26s cubic-bezier(0.34,1.28,0.64,1); }
+      .lion-graph-close-btn:hover { background:rgba(255,255,255,0.22)!important; }
+      .lion-info-row { display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.07); }
+      .lion-info-row:last-child { border-bottom:none; }
+      .lion-info-label { font-size:12px;color:rgba(255,255,255,0.45);font-weight:500; }
+      .lion-info-value { font-size:13px;font-weight:600;color:rgba(255,255,255,0.9);text-align:right; }
+      .lion-seg-btn { flex:1;text-align:center;padding:7px 4px;font-size:12px;font-weight:600;border-radius:7px;cursor:pointer;color:rgba(255,255,255,0.55);border:none;background:none;transition:all 0.2s;font-family:inherit;touch-action:manipulation; }
+      .lion-seg-btn.active { background:${accent};color:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.35); }
+    `;
 
+    const popup = document.createElement('div');
+    popup.className = 'lion-graph-popup';
+    popup.style.cssText = `background:${popupBg};backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border:1px solid rgba(255,255,255,0.13);border-radius:26px;box-shadow:0 28px 72px rgba(0,0,0,0.65);padding:20px;width:100%;max-width:400px;max-height:85vh;overflow-y:auto;color:${textCol};font-family:${this._haFont()};`;
+    popup.addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
+
+    // ── Header ────────────────────────────────────────────────────────────
+    const headerRow = document.createElement('div');
+    headerRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;';
+    headerRow.innerHTML = `
+      <span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.4);">${name}</span>
+      <button class="lion-graph-close-btn" style="background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:30px;height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.65);font-size:16px;line-height:1;padding:0;transition:background 0.15s;flex-shrink:0;">✕</button>`;
+    headerRow.querySelector('.lion-graph-close-btn').addEventListener('click', closeGraph);
+
+    // ── Current reading ───────────────────────────────────────────────────
+    const valueColor = isHigh ? highCol : accent;
+    const readingRow = document.createElement('div');
+    readingRow.style.cssText = 'display:flex;align-items:baseline;gap:6px;margin-bottom:4px;';
+    readingRow.innerHTML = `
+      <span style="font-size:52px;font-weight:700;letter-spacing:-2px;color:${valueColor};line-height:1;">${lux !== null ? this._luxLabel(lux) : '—'}</span>`;
+
+    const stateTag = document.createElement('div');
+    stateTag.style.cssText = `font-size:13px;font-weight:600;color:${isHigh ? highCol : 'rgba(255,255,255,0.3)'};margin-bottom:14px;`;
+    stateTag.textContent = isHigh ? 'Bright' : 'Low';
+
+    // ── Time-range segmented control ──────────────────────────────────────
+    const segWrap = document.createElement('div');
+    segWrap.style.cssText = 'display:flex;background:rgba(118,118,128,0.2);border-radius:10px;padding:3px;gap:2px;margin-bottom:12px;';
+
+    const graphWrap = document.createElement('div');
+    graphWrap.style.cssText = 'height:150px;margin-bottom:16px;position:relative;border-radius:14px;overflow:hidden;background:rgba(255,255,255,0.03);padding:4px;';
+    graphWrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Loading…</div>`;
+
+    [1, 3, 6, 12, 24].forEach(h => {
+      const btn = document.createElement('button');
+      btn.className = 'lion-seg-btn' + (h === this._graphHours ? ' active' : '');
+      btn.textContent = `${h}h`;
+      btn.dataset.hours = h;
+      const switchHours = e => {
+        if (e.type === 'touchend') e.preventDefault();
+        this._graphHours = h;
+        segWrap.querySelectorAll('.lion-seg-btn').forEach(b => b.classList.toggle('active', parseInt(b.dataset.hours) === h));
+        graphWrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Loading…</div>`;
+        this._loadLuxGraph(entityId, graphWrap, accent, highCol, h);
+      };
+      btn.addEventListener('click', switchHours);
+      btn.addEventListener('touchend', switchHours);
+      segWrap.appendChild(btn);
+    });
+
+    // ── Info rows ─────────────────────────────────────────────────────────
+    const infoWrap = document.createElement('div');
+    const lastChanged = stateObj?.last_changed || stateObj?.last_updated;
+    let timeAgo = '—';
+    if (lastChanged) {
+      const mins = Math.floor((Date.now() - new Date(lastChanged).getTime()) / 60000);
+      timeAgo = mins < 1 ? 'Just now' : mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)}h ago`;
+    }
+    const dc = this._deviceClass(entityId);
+    const infoRows = [
+      { label: 'Last updated',     value: timeAgo },
+      { label: 'Bright threshold', value: `${cfg.high_threshold ?? 1000} ${unit}` },
+    ];
+    if (dc) infoRows.push({ label: 'Type',    value: dc.charAt(0).toUpperCase() + dc.slice(1) });
+    if (attrs.battery_level !== undefined) infoRows.push({ label: 'Battery', value: `${attrs.battery_level}%` });
+
+    infoRows.forEach(({ label, value }) => {
+      const row = document.createElement('div');
+      row.className = 'lion-info-row';
+      row.innerHTML = `<span class="lion-info-label">${label}</span><span class="lion-info-value">${value}</span>`;
+      infoWrap.appendChild(row);
+    });
+
+    popup.appendChild(style);
+    popup.appendChild(headerRow);
+    popup.appendChild(readingRow);
+    popup.appendChild(stateTag);
+    popup.appendChild(segWrap);
+    popup.appendChild(graphWrap);
+    popup.appendChild(infoWrap);
+
+    graphOverlay.appendChild(popup);
+    graphOverlay.addEventListener('click', e => { if (e.target === graphOverlay) closeGraph(); });
+    document.body.appendChild(graphOverlay);
+
+    this._loadLuxGraph(entityId, graphWrap, accent, highCol, this._graphHours);
+  }
+
+  // ── Load lux history and render graph ─────────────────────────────────────
+
+  async _loadLuxGraph(entityId, container, accent, highCol, hours) {
     try {
       const end   = new Date();
-      const start = new Date(end - 24 * 3600000);
+      const start = new Date(end - hours * 3600000);
       const resp  = await this._hass.callApi('GET',
-        `history/period/${start.toISOString()}?filter_entity_id=${entityId}&end_time=${end.toISOString()}&minimal_response=true&no_attributes=false`
+        `history/period/${start.toISOString()}?filter_entity_id=${entityId}&end_time=${end.toISOString()}&minimal_response=true&no_attributes=true`
       );
-      const raw = (resp?.[0] || []).filter(s => s.state !== 'unavailable' && s.state !== 'unknown' && !isNaN(parseFloat(s.state)));
+      const raw   = resp?.[0] || [];
+      const valid = raw.filter(s => !isNaN(parseFloat(s.state)));
 
-      loadingEl.remove();
-
-      if (!raw.length) {
-        const emptyEl = document.createElement('div');
-        emptyEl.style.cssText = 'text-align:center;padding:20px;color:rgba(255,255,255,0.25);font-size:13px;';
-        emptyEl.textContent = 'No history in the last 24 hours';
-        inner.appendChild(emptyEl);
+      if (valid.length < 2) {
+        container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Not enough history</div>`;
         return;
       }
 
-      const highThreshold = this._config.high_threshold ?? 1000;
-      const items = [...raw].reverse();
-
-      items.forEach((entry, idx) => {
-        const lux     = parseFloat(entry.state);
-        const isHigh  = lux >= highThreshold;
-        const ts      = new Date(entry.last_changed || entry.last_updated);
-        const timeStr = `${ts.getHours().toString().padStart(2,'0')}:${ts.getMinutes().toString().padStart(2,'0')}`;
-        const dateStr = ts.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-
-        let durationStr = '';
-        if (idx < items.length - 1) {
-          const nextTs  = new Date(items[idx + 1].last_changed || items[idx + 1].last_updated);
-          const diffMin = Math.round((ts - nextTs) / 60000);
-          durationStr   = diffMin < 60
-            ? `${diffMin}m`
-            : `${Math.floor(diffMin / 60)}h ${diffMin % 60}m`;
-        }
-
-        const row = document.createElement('div');
-        row.style.cssText = `display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);${idx === 0 ? 'border-top:1px solid rgba(255,255,255,0.06);' : ''}`;
-
-        const dot = document.createElement('div');
-        dot.style.cssText = `width:10px;height:10px;border-radius:50%;flex-shrink:0;background:${isHigh ? accent : 'rgba(255,255,255,0.2)'};`;
-
-        const info = document.createElement('div');
-        info.style.cssText = 'flex:1;min-width:0;';
-        info.innerHTML = `
-          <div style="font-size:13px;font-weight:600;color:${isHigh ? accent : 'rgba(255,255,255,0.45)'};">${this._luxLabel(lux)}</div>
-          <div style="font-size:11px;color:rgba(255,255,255,0.3);margin-top:2px;">${dateStr} · ${timeStr}</div>`;
-
-        row.appendChild(dot);
-        row.appendChild(info);
-
-        if (durationStr) {
-          const dur = document.createElement('div');
-          dur.style.cssText = 'font-size:11px;color:rgba(255,255,255,0.3);flex-shrink:0;';
-          dur.textContent = durationStr;
-          row.appendChild(dur);
-        }
-
-        inner.appendChild(row);
-      });
-    } catch(e) {
-      loadingEl.textContent = 'Could not load history';
+      const values     = valid.map(s => parseFloat(s.state));
+      const timestamps = valid.map(s => s.last_changed || s.last_updated);
+      container.innerHTML = this._buildLuxGraph(values, timestamps, accent, highCol);
+      const svg = container.querySelector('svg');
+      if (svg) this._attachLuxCrosshair(svg, values, timestamps, accent, highCol);
+    } catch (e) {
+      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Could not load history</div>`;
     }
+  }
+
+  // ── Build continuous lux line-graph SVG ───────────────────────────────────
+
+  _buildLuxGraph(values, timestamps, accent, highCol) {
+    const W = 380, H = 140;
+    const pad   = { top: 12, right: 10, bottom: 22, left: 44 };
+    const plotW = W - pad.left - pad.right;
+    const plotH = H - pad.top  - pad.bottom;
+
+    const rawMin    = Math.min(...values), rawMax = Math.max(...values);
+    const threshold = this._config.high_threshold ?? 1000;
+
+    // Vertical padding — keep threshold visible when near the edge
+    const vpad = Math.max((rawMax - rawMin) * 0.18, rawMax * 0.05, 1);
+    const min  = Math.max(0, rawMin - vpad);
+    const max  = Math.max(rawMax + vpad, threshold * 1.05);
+    const range = max - min || 1;
+
+    const xs = values.map((_, i) => pad.left + (i / Math.max(values.length - 1, 1)) * plotW);
+    const ys = values.map(v    => pad.top  + plotH - ((v - min) / range) * plotH);
+    const clampY = v => Math.max(pad.top, Math.min(pad.top + plotH,
+                          pad.top + plotH - ((v - min) / range) * plotH));
+
+    // Coloured line segments: above threshold → highCol, below → accent
+    let segments = '';
+    for (let i = 1; i < values.length; i++) {
+      const mid = (values[i - 1] + values[i]) / 2;
+      const col = mid >= threshold ? highCol : accent;
+      segments += `<line x1="${xs[i-1].toFixed(1)}" y1="${ys[i-1].toFixed(1)}" x2="${xs[i].toFixed(1)}" y2="${ys[i].toFixed(1)}" stroke="${col}" stroke-width="2.5" stroke-linecap="round"/>`;
+    }
+
+    // Filled area
+    const linePath = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+    const fillPath = linePath
+      + ` L${xs[xs.length-1].toFixed(1)},${(pad.top + plotH).toFixed(1)}`
+      + ` L${pad.left},${(pad.top + plotH).toFixed(1)} Z`;
+
+    // Y-axis labels + grid lines
+    const steps   = 4;
+    const svgFont = this._haFont();
+    const fmtAxis = v => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+    let yLabels = '';
+    for (let i = 0; i <= steps; i++) {
+      const v = min + (range * i / steps);
+      const y = pad.top + plotH - (i / steps) * plotH;
+      yLabels += `<text x="${pad.left - 4}" y="${(y + 3).toFixed(1)}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="end" font-family="${svgFont}">${fmtAxis(v)}</text>`;
+      yLabels += `<line x1="${pad.left}" y1="${y.toFixed(1)}" x2="${W - pad.right}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+    }
+
+    // Dashed threshold line
+    let thresholdLine = '';
+    if (threshold >= min && threshold <= max) {
+      const thrY = clampY(threshold);
+      thresholdLine = `
+        <line x1="${pad.left}" y1="${thrY.toFixed(1)}" x2="${W - pad.right}" y2="${thrY.toFixed(1)}" stroke="${highCol}" stroke-width="1" stroke-dasharray="4 3" opacity="0.5"/>
+        <text x="${W - pad.right - 2}" y="${(thrY - 3).toFixed(1)}" fill="${highCol}" font-size="7" text-anchor="end" font-family="${svgFont}" opacity="0.7">${fmtAxis(threshold)}</text>`;
+    }
+
+    // Time axis labels (start, mid index, end)
+    const n = values.length;
+    const fmtTime = ts => {
+      if (!ts) return '';
+      const d = new Date(ts);
+      return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+    };
+    let timeLabels = '';
+    if (timestamps && n >= 2) {
+      const midIdx = Math.floor(n / 2);
+      timeLabels = `
+        <text x="${pad.left}"                   y="${H - 3}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="start"  font-family="${svgFont}">${fmtTime(timestamps[0])}</text>
+        <text x="${xs[midIdx].toFixed(1)}"      y="${H - 3}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="middle" font-family="${svgFont}">${fmtTime(timestamps[midIdx])}</text>
+        <text x="${W - pad.right}"              y="${H - 3}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="end"    font-family="${svgFont}">${fmtTime(timestamps[n - 1])}</text>`;
+    }
+
+    return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block;">
+      ${yLabels}
+      ${thresholdLine}
+      <path d="${fillPath}" fill="${accent}" opacity="0.10"/>
+      ${segments}
+      ${timeLabels}
+    </svg>`;
+  }
+
+  // ── Crosshair interaction for lux graph ───────────────────────────────────
+
+  _attachLuxCrosshair(svg, values, times, accent, highCol) {
+    const W     = 380, H = 140;
+    const pad   = { top: 12, right: 10, bottom: 22, left: 44 };
+    const plotW = W - pad.left - pad.right;
+    const plotH = H - pad.top  - pad.bottom;
+
+    let crosshairGroup = null;
+    let isDragging     = false;
+
+    const clientXtoSvgX = clientX => {
+      const rect   = svg.getBoundingClientRect();
+      const scaleX = W / rect.width;
+      return (clientX - rect.left) * scaleX;
+    };
+
+    const fmtTime = ts => {
+      if (!ts) return '';
+      const d = new Date(ts);
+      return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+    };
+
+    const showCrosshair = svgX => {
+      const cx       = Math.max(pad.left, Math.min(W - pad.right, svgX));
+      const xRatio   = (cx - pad.left) / plotW;
+      const exactIdx = xRatio * (values.length - 1);
+      const lIdx     = Math.floor(exactIdx);
+      const rIdx     = Math.min(lIdx + 1, values.length - 1);
+      const frac     = exactIdx - lIdx;
+      const val      = values[lIdx] + (values[rIdx] - values[lIdx]) * frac;
+      const threshold = this._config.high_threshold ?? 1000;
+      const color    = val >= threshold ? highCol : accent;
+      const label    = this._luxLabel(val);
+      const snapIdx  = frac < 0.5 ? lIdx : rIdx;
+      const timeStr  = times ? fmtTime(times[snapIdx]) : '';
+      const hasTime  = timeStr.length > 0;
+
+      if (crosshairGroup) crosshairGroup.remove();
+      crosshairGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+
+      // Dotted vertical line
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', cx.toFixed(1));
+      line.setAttribute('y1', pad.top.toString());
+      line.setAttribute('x2', cx.toFixed(1));
+      line.setAttribute('y2', (pad.top + plotH).toString());
+      line.setAttribute('stroke', 'rgba(255,255,255,0.75)');
+      line.setAttribute('stroke-width', '1.5');
+      line.setAttribute('stroke-dasharray', '4 3');
+
+      // Tooltip pill — wider to fit lux labels like "12.5k lx"
+      const lblW = hasTime ? 68 : 58;
+      const lblH = hasTime ? 44 : 26;
+      const lblX = Math.max(pad.left + lblW / 2, Math.min(W - pad.right - lblW / 2, cx));
+      const lblY = pad.top + 1;
+
+      const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      bgRect.setAttribute('x',            (lblX - lblW / 2).toFixed(1));
+      bgRect.setAttribute('y',            lblY.toFixed(1));
+      bgRect.setAttribute('width',        lblW.toString());
+      bgRect.setAttribute('height',       lblH.toString());
+      bgRect.setAttribute('rx',           '6');
+      bgRect.setAttribute('fill',         'rgba(0,0,0,0.80)');
+      bgRect.setAttribute('stroke',       color);
+      bgRect.setAttribute('stroke-width', '1.5');
+
+      const valText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      valText.setAttribute('x',           lblX.toFixed(1));
+      valText.setAttribute('y',           (lblY + (hasTime ? 16 : 18)).toFixed(1));
+      valText.setAttribute('fill',        color);
+      valText.setAttribute('font-size',   '12');
+      valText.setAttribute('font-weight', '700');
+      valText.setAttribute('text-anchor', 'middle');
+      valText.setAttribute('font-family', this._haFont());
+      valText.textContent = label;
+
+      crosshairGroup.appendChild(line);
+      crosshairGroup.appendChild(bgRect);
+      crosshairGroup.appendChild(valText);
+
+      if (hasTime) {
+        const timeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        timeText.setAttribute('x',           lblX.toFixed(1));
+        timeText.setAttribute('y',           (lblY + 33).toFixed(1));
+        timeText.setAttribute('fill',        'rgba(255,255,255,0.65)');
+        timeText.setAttribute('font-size',   '12');
+        timeText.setAttribute('font-weight', '500');
+        timeText.setAttribute('text-anchor', 'middle');
+        timeText.setAttribute('font-family', this._haFont());
+        timeText.textContent = timeStr;
+        crosshairGroup.appendChild(timeText);
+      }
+
+      svg.appendChild(crosshairGroup);
+    };
+
+    const clearCrosshair = () => {
+      if (crosshairGroup) { crosshairGroup.remove(); crosshairGroup = null; }
+    };
+
+    svg.style.cursor = 'crosshair';
+
+    // ── Touch ──
+    svg.addEventListener('touchstart', e => {
+      e.stopPropagation(); e.preventDefault();
+      const svgX = clientXtoSvgX(e.touches[0].clientX);
+      if (svgX < pad.left || svgX > W - pad.right) return;
+      isDragging = true;
+      showCrosshair(svgX);
+    }, { passive: false });
+
+    svg.addEventListener('touchmove', e => {
+      if (!isDragging) return;
+      e.stopPropagation(); e.preventDefault();
+      const svgX = clientXtoSvgX(e.touches[0].clientX);
+      if (svgX >= pad.left && svgX <= W - pad.right) showCrosshair(svgX);
+    }, { passive: false });
+
+    svg.addEventListener('touchend', e => {
+      e.stopPropagation();
+      isDragging = false;
+    }, { passive: false });
+
+    svg.addEventListener('touchcancel', () => { isDragging = false; });
+
+    // ── Mouse ──
+    svg.addEventListener('mousedown', e => {
+      e.stopPropagation();
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX < pad.left || svgX > W - pad.right) return;
+      isDragging = true;
+      showCrosshair(svgX);
+    });
+
+    svg.addEventListener('mousemove', e => {
+      if (!isDragging) return;
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX >= pad.left && svgX <= W - pad.right) showCrosshair(svgX);
+    });
+
+    svg.addEventListener('mouseup', e => {
+      e.stopPropagation();
+      if (!isDragging) return;
+      isDragging = false;
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX < pad.left || svgX > W - pad.right) clearCrosshair();
+    });
+
+    svg.addEventListener('mouseleave', () => { isDragging = false; });
+
+    svg.addEventListener('click', e => {
+      e.stopPropagation();
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX < pad.left || svgX > W - pad.right) clearCrosshair();
+    });
   }
 }
 
